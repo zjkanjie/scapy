@@ -17,28 +17,28 @@ iface1 = "vcan1"
 
 = Initialize a virtual CAN interface
 ~ vcan_socket needs_root linux
-if 0 != call("cansend %s 000#" % iface0, shell=True):
+if 0 != call(["cansend", iface0,  "000#"]):
     # vcan0 is not enabled
-    if 0 != call("sudo modprobe vcan", shell=True):
+    if 0 != call(["sudo", "modprobe", "vcan"]):
         raise Exception("modprobe vcan failed")
-    if 0 != call("sudo ip link add name %s type vcan" % iface0, shell=True):
+    if 0 != call(["sudo", "ip", "link", "add", "name", iface0, "type", "vcan"]):
         print("add %s failed: Maybe it was already up?" % iface0)
-    if 0 != call("sudo ip link set dev %s up" % iface0, shell=True):
+    if 0 != call(["sudo", "ip", "link", "set", "dev", iface0, "up"]):
         raise Exception("could not bring up %s" % iface0)
 
-if 0 != call("cansend %s 000#" % iface0, shell=True):
+if 0 != call(["cansend", iface0,  "000#"]):
     raise Exception("cansend doesn't work")
 
-if 0 != call("cansend %s 000#" % iface1, shell=True):
+if 0 != call(["cansend", iface1,  "000#"]):
     # vcan1 is not enabled
-    if 0 != call("sudo modprobe vcan", shell=True):
+    if 0 != call(["sudo", "modprobe", "vcan"]):
         raise Exception("modprobe vcan failed")
-    if 0 != call("sudo ip link add name %s type vcan" % iface1, shell=True):
+    if 0 != call(["sudo", "ip", "link", "add", "name", iface1, "type", "vcan"]):
         print("add %s failed: Maybe it was already up?" % iface1)
-    if 0 != call("sudo ip link set dev %s up" % iface1, shell=True):
+    if 0 != call(["sudo", "ip", "link", "set", "dev", iface1, "up"]):
         raise Exception("could not bring up %s" % iface1)
 
-if 0 != call("cansend %s 000#" % iface1, shell=True):
+if 0 != call(["cansend", iface1,  "000#"]):
     raise Exception("cansend doesn't work")
 
 print("CAN should work now")
@@ -48,22 +48,21 @@ print("CAN should work now")
 from scapy.contrib.cansocket_python_can import *
 
 import can as python_can
-new_can_socket = lambda iface: CANSocket(iface=python_can.interface.Bus(bustype='virtual', channel=iface))
-new_can_socket0 = lambda: CANSocket(iface=python_can.interface.Bus(bustype='virtual', channel=iface0), timeout=0.01)
-new_can_socket1 = lambda: CANSocket(iface=python_can.interface.Bus(bustype='virtual', channel=iface1), timeout=0.01)
+new_can_socket = lambda iface: CANSocket(bustype='virtual', channel=iface)
+new_can_socket0 = lambda: CANSocket(bustype='virtual', channel=iface0, timeout=0.01)
+new_can_socket1 = lambda: CANSocket(bustype='virtual', channel=iface1, timeout=0.01)
 
 # utility function for draining a can interface, asserting that no packets are there
 def drain_bus(iface=iface0, assert_empty=True):
-    s = new_can_socket(iface)
-    pkts = s.sniff(timeout=0.1)
-    if assert_empty:
-        assert len(pkts) == 0
-    s.close()
+    with new_can_socket(iface) as s:
+        pkts = s.sniff(timeout=0.1)
+        if assert_empty:
+            assert len(pkts) == 0
 
 print("CAN sockets should work now")
 
 = Overwrite definition for vcan_socket systems native sockets
-~ vcan_socket needs_root linux
+~ vcan_socket not_pypy needs_root linux
 
 if six.PY3 and LINUX:
     from scapy.contrib.cansocket_native import *
@@ -76,9 +75,9 @@ if six.PY3 and LINUX:
 ~ vcan_socket needs_root linux
 
 if "python_can" in CANSocket.__module__:
-    new_can_socket = lambda iface: CANSocket(iface=python_can.interface.Bus(bustype='socketcan', channel=iface, bitrate=250000), timeout=0.01)
-    new_can_socket0 = lambda: CANSocket(iface=python_can.interface.Bus(bustype='socketcan', channel=iface0, bitrate=250000), timeout=0.01)
-    new_can_socket1 = lambda: CANSocket(iface=python_can.interface.Bus(bustype='socketcan', channel=iface1, bitrate=250000), timeout=0.01)
+    new_can_socket = lambda iface: CANSocket(bustype='socketcan', channel=iface, bitrate=250000, timeout=0.01)
+    new_can_socket0 = lambda: CANSocket(bustype='socketcan', channel=iface0, bitrate=250000, timeout=0.01)
+    new_can_socket1 = lambda: CANSocket(bustype='socketcan', channel=iface1, bitrate=250000, timeout=0.01)
 
 
 = Verify that a CAN socket can be created and closed
@@ -958,30 +957,23 @@ assert dto.hashret() == cro.hashret()
 
 + Tests on a virtual CAN-Bus
 
-= Create sockets
-
-sock1 = new_can_socket0()
-sock2 = new_can_socket0()
-
-sock1.basecls = CCP
-
 = CAN Socket sr1 with dto.ansers(cro) == True
 
-def ecu():
-    pkts = sock2.sniff(count=1, timeout=1)
-    if len(pkts) == 1:
-        cro = CRO(pkts[0].data)
-        assert cro.cmd == 0x22
-        assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-        sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x53\x02\x34\x00\x20\x06'))
-
-
-thread = threading.Thread(target=ecu)
-thread.start()
-time.sleep(0.1)
-
-dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x53)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
-thread.join()
+with new_can_socket0() as sock1, new_can_socket0() as sock2:
+    sock1.basecls = CCP
+    started = threading.Event()
+    def ecu():
+        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
+        if len(pkts) == 1:
+            cro = CRO(pkts[0].data)
+            assert cro.cmd == 0x22
+            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x53\x02\x34\x00\x20\x06'))
+    thread = threading.Thread(target=ecu)
+    thread.start()
+    started.wait(timeout=5)
+    dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x53)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
+    thread.join(timeout=5)
 
 assert dto.ctr == 83
 assert dto.packet_id == 0xff
@@ -992,47 +984,44 @@ assert dto.MTA0_address == 0x34002006
 
 = CAN Socket sr1 with dto.ansers(cro) == False
 
-def ecu():
-    pkts = sock2.sniff(count=1, timeout=1)
-    if len(pkts) == 1:
-        cro = CRO(pkts[0].data)
-        assert cro.cmd == 0x22
-        assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-        sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x55\x02\x34\x00\x20\x06'))
-
-
-thread = threading.Thread(target=ecu)
-thread.start()
-time.sleep(0.1)
-gotTimeout = False
-try:
+with new_can_socket0() as sock1, new_can_socket0() as sock2:
+    sock1.basecls = CCP
+    started = threading.Event()
+    def ecu():
+        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
+        if len(pkts) == 1:
+            cro = CRO(pkts[0].data)
+            assert cro.cmd == 0x22
+            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x55\x02\x34\x00\x20\x06'))
+    thread = threading.Thread(target=ecu)
+    thread.start()
+    started.wait(timeout=5)
+    gotTimeout = False
     dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x54)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
     print(dto)
     if dto is None:
         gotTimeout = True
-except CANSocketTimeoutElapsed as e:
-    gotTimeout = True
-
-assert gotTimeout
-thread.join()
+    assert gotTimeout
+    thread.join(timeout=5)
 
 = CAN Socket sr1 with error code
 
-def ecu():
-    pkts = sock2.sniff(count=1, timeout=1)
-    if len(pkts) == 1:
-        cro = CRO(pkts[0].data)
-        assert cro.cmd == 0x22
-        assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-        sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x01\x55\xff\xff\xff\xff\xff'))
-
-
-thread = threading.Thread(target=ecu)
-thread.start()
-time.sleep(0.1)
-
-dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x55)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
-thread.join()
+with new_can_socket0() as sock1, new_can_socket0() as sock2:
+    sock1.basecls = CCP
+    started = threading.Event()
+    def ecu():
+        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
+        if len(pkts) == 1:
+            cro = CRO(pkts[0].data)
+            assert cro.cmd == 0x22
+            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x01\x55\xff\xff\xff\xff\xff'))
+    thread = threading.Thread(target=ecu)
+    thread.start()
+    started.wait(timeout=5)
+    dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x55)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
+    thread.join(timeout=5)
 
 assert dto.ctr == 85
 assert dto.packet_id == 0xff
@@ -1046,8 +1035,8 @@ assert dto.MTA0_address == 0xffffffff
 = Delete vcan interfaces
 ~ vcan_socket needs_root linux
 
-if 0 != call("sudo ip link delete %s" % iface0, shell=True):
+if 0 != call(["sudo", "ip", "link", "delete", iface0]):
         raise Exception("%s could not be deleted" % iface0)
 
-if 0 != call("sudo ip link delete %s" % iface1, shell=True):
+if 0 != call(["sudo", "ip", "link", "delete", iface1]):
         raise Exception("%s could not be deleted" % iface1)

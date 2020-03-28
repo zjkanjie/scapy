@@ -44,7 +44,7 @@ from scapy.compat import plain_str, bytes_encode, \
     gzip_compress, gzip_decompress
 from scapy.config import conf
 from scapy.consts import WINDOWS
-from scapy.error import warning
+from scapy.error import warning, log_loading
 from scapy.fields import StrField
 from scapy.packet import Packet, bind_layers, bind_bottom_up, Raw
 from scapy.utils import get_temp_file, ContextManagerSubprocess
@@ -52,6 +52,14 @@ from scapy.utils import get_temp_file, ContextManagerSubprocess
 from scapy.layers.inet import TCP, TCP_client
 
 from scapy.modules import six
+
+try:
+    import brotli
+    is_brotli_available = True
+except ImportError:
+    is_brotli_available = False
+    log_loading.info("Can't import brotli. Won't be able to decompress "
+                     "data streams compressed with brotli.")
 
 if "http" not in conf.contribs:
     conf.contribs["http"] = {}
@@ -298,6 +306,8 @@ class _HTTPContent(Packet):
             elif "compress" in encodings:
                 import lzw
                 s = lzw.decompress(s)
+            elif "br" in encodings and is_brotli_available:
+                s = brotli.decompress(s)
         except Exception:
             # Cannot decompress - probably incomplete data
             pass
@@ -316,6 +326,8 @@ class _HTTPContent(Packet):
         elif "compress" in encodings:
             import lzw
             pay = lzw.compress(pay)
+        elif "br" in encodings and is_brotli_available:
+            pay = brotli.compress(pay)
         return pkt + pay
 
     def self_build(self, field_pos_list=None):
@@ -594,7 +606,8 @@ class HTTP(Packet):
 
 
 def http_request(host, path="/", port=80, timeout=3,
-                 display=False, verbose=None, **headers):
+                 display=False, verbose=0,
+                 iptables=False, **headers):
     """Util to perform an HTTP request, using the TCP_client.
 
     :param host: the host to connect to
@@ -602,6 +615,8 @@ def http_request(host, path="/", port=80, timeout=3,
     :param port: the port (default 80)
     :param timeout: timeout before None is returned
     :param display: display the resullt in the default browser (default False)
+    :param iptables: temporarily prevents the kernel from
+      answering with a TCP RESET message.
     :param headers: any additional headers passed to the request
 
     :returns: the HTTPResponse packet
@@ -616,12 +631,18 @@ def http_request(host, path="/", port=80, timeout=3,
     }
     http_headers.update(headers)
     req = HTTP() / HTTPRequest(**http_headers)
-    tcp_client = TCP_client.tcplink(HTTP, host, 80)
+    tcp_client = TCP_client.tcplink(HTTP, host, port, debug=verbose)
     ans = None
+    if iptables:
+        ip = tcp_client.atmt.dst
+        iptables_rule = "iptables -%c INPUT -s %s -p tcp --sport 80 -j DROP"
+        assert(os.system(iptables_rule % ('A', ip)) == 0)
     try:
         ans = tcp_client.sr1(req, timeout=timeout, verbose=verbose)
     finally:
         tcp_client.close()
+        if iptables:
+            assert(os.system(iptables_rule % ('D', ip)) == 0)
     if ans:
         if display:
             if Raw not in ans:

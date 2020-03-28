@@ -8,21 +8,25 @@
 """
 Cisco NetFlow protocol v1, v5, v9 and v10 (IPFix)
 
-HowTo dissect NetflowV9/10 (IPFix) packets:
+HowTo dissect NetflowV9/10 (IPFix) packets
 
 # From a pcap / list of packets
 
-Using sniff and sessions:
->>> sniff(offline=open("my_great_pcap.pcap", "rb"), session=NetflowSession)
+Using sniff and sessions::
+
+    >>> sniff(offline=open("my_great_pcap.pcap", "rb"), session=NetflowSession)
 
 Using the netflowv9_defragment/ipfix_defragment commands:
+
 - get a list of packets containing NetflowV9/10 packets
 - call `netflowv9_defragment(plist)` to defragment the list
 
 (ipfix_defragment is an alias for netflowv9_defragment)
 
-# Live / on-the-flow / other: use NetflowSession
->>> sniff(session=NetflowSession, prn=[...])
+# Live / on-the-flow / other: use NetflowSession::
+
+    >>> sniff(session=NetflowSession, prn=[...])
+
 """
 
 import socket
@@ -30,12 +34,13 @@ import struct
 
 from scapy.config import conf
 from scapy.data import IP_PROTOS
-from scapy.error import warning
+from scapy.error import warning, Scapy_Exception
 from scapy.fields import ByteEnumField, ByteField, Field, FieldLenField, \
     FlagsField, IPField, IntField, MACField, \
     PacketListField, PadField, SecondsIntField, ShortEnumField, ShortField, \
     StrField, StrFixedLenField, ThreeBytesField, UTCTimeField, XByteField, \
-    XShortField, LongField, BitField, ConditionalField, BitEnumField
+    XShortField, LongField, BitField, ConditionalField, BitEnumField, \
+    StrLenField
 from scapy.packet import Packet, bind_layers, bind_bottom_up
 from scapy.plist import PacketList
 from scapy.sessions import IPSession, DefaultSession
@@ -1322,6 +1327,34 @@ def _GenNetflowRecordV9(cls, lengths_list):
     return NetflowRecordV9I
 
 
+def GetNetflowRecordV9(flowset, templateID=None):
+    """
+    Get a NetflowRecordV9/10 for a specific NetflowFlowsetV9/10.
+
+    Have a look at the online doc for examples.
+    """
+    definitions = {}
+    for ntv9 in flowset.templates:
+        llist = []
+        for tmpl in ntv9.template_fields:
+            llist.append((tmpl.fieldLength, tmpl.fieldType))
+        if llist:
+            cls = _GenNetflowRecordV9(NetflowRecordV9, llist)
+            definitions[ntv9.templateID] = cls
+    if not definitions:
+        raise Scapy_Exception(
+            "No template IDs detected"
+        )
+    if len(definitions) > 1:
+        if templateID is None:
+            raise Scapy_Exception(
+                "Multiple possible templates ! Specify templateID=.."
+            )
+        return definitions[templateID]
+    else:
+        return list(definitions.values())[0]
+
+
 class NetflowRecordV9(Packet):
     name = "Netflow DataFlowset Record V9/10"
     fields_desc = [StrField("fieldValue", "")]
@@ -1436,7 +1469,11 @@ def _netflowv9_defragment_packet(pkt, definitions, definitions_opts, ignored):
                 data = data[tot_len:]
             # Inject dissected data
             datafl.records = res
-            datafl.do_dissect_payload(data)
+            if data:
+                if len(data) <= 4:
+                    datafl.add_payload(conf.padding_layer(data))
+                else:
+                    datafl.do_dissect_payload(data)
         # Options
         elif tid in definitions_opts:
             (scope_len, scope_cls,
@@ -1562,24 +1599,21 @@ class NetflowOptionsFlowsetV9(Packet):
                    PacketListField(
                        "options", [],
                        NetflowOptionsFlowsetOptionV9,
-                       length_from=lambda pkt: pkt.option_field_length)]
-
-    def extract_padding(self, s):
-        if self.length is None:
-            return s, ""
-        # Calc pad length
-        pad_len = self.length - self.option_scope_length - \
-            self.option_field_length - 10
-        return s[pad_len:], s[:pad_len]
+                       length_from=lambda pkt: pkt.option_field_length),
+                   StrLenField("pad", None, length_from=lambda pkt: (
+                       pkt.length - pkt.option_scope_length -
+                       pkt.option_field_length - 10))]
 
     def default_payload_class(self, p):
         return conf.padding_layer
 
     def post_build(self, pkt, pay):
-        # Padding 4-bytes with b"\x00"
-        pkt += (-len(pkt) % 4) * b"\x00"
         if self.length is None:
             pkt = pkt[:2] + struct.pack("!H", len(pkt)) + pkt[4:]
+        if self.pad is None:
+            # Padding 4-bytes with b"\x00"
+            start = 10 + self.option_scope_length + self.option_field_length
+            pkt = pkt[:start] + (-len(pkt) % 4) * b"\x00"
         return pkt + pay
 
 
@@ -1610,14 +1644,18 @@ class NetflowOptionsFlowset10(NetflowOptionsFlowsetV9):
                        NetflowOptionsFlowsetOptionV9,
                        count_from=lambda pkt: (
                            pkt.field_count - pkt.scope_field_count
-                       ))]
+                       )),
+                   StrLenField("pad", None, length_from=lambda pkt: (
+                       pkt.length - (pkt.scope_field_count * 4) - 10))]
 
-    def extract_padding(self, s):
+    def post_build(self, pkt, pay):
         if self.length is None:
-            return s, ""
-        # Calc pad length
-        pad_len = self.length - (self.scope_field_count * 4) - 10
-        return s[pad_len:], s[:pad_len]
+            pkt = pkt[:2] + struct.pack("!H", len(pkt)) + pkt[4:]
+        if self.pad is None:
+            # Padding 4-bytes with b"\x00"
+            start = 10 + self.scope_field_count * 4
+            pkt = pkt[:start] + (-len(pkt) % 4) * b"\x00"
+        return pkt + pay
 
 
 bind_layers(NetflowHeader, NetflowHeaderV9, version=9)
